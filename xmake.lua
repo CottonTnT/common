@@ -29,3 +29,6 @@ target_end()
 
 -- 测试目标（Catch2，定义在 test/xmake.lua 中）
 includes("test")
+
+-- 性能基准目标（定义在 bench/xmake.lua 中）
+includes("bench")

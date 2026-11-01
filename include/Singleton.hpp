@@ -64,7 +64,7 @@ public:
         return derived;
     }
 
-    template <typename>
+    template <typename U = void>
         requires std::constructible_from<T, ConstructToken>
     static auto getInstanceRef()
         -> T&
