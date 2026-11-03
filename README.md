@@ -21,7 +21,7 @@
 | [`ThreadPool.hpp`](include/ThreadPool.hpp) | `X::ThreadPool`，工作窃取线程池：每个 worker 持有本地有界队列，统一全局容量控制 |
 
 ## 使用方式
-
+#include <cstddef>
 在项目的 `xmake.lua` 中依赖 `common`，即可直接包含头文件：
 
 ```lua
