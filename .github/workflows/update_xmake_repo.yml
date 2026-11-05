@@ -1,0 +1,85 @@
+name: Update xmake-repo Version
+
+on:
+  push:
+    tags:
+      - 'v*' # 匹配所有 v 开头的 Tag
+
+jobs:
+  update-repo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+
+      - name: Calculate Tag SHA256
+        id: calc_sha
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+          
+          # 打包并计算 SHA256
+          ARCHIVE_NAME="archive.tar.gz"
+          git archive --format=tar.gz HEAD > "$ARCHIVE_NAME"
+          SHA256=$(sha256sum "$ARCHIVE_NAME" | awk '{print $1}')
+          
+          echo "SHA256=$SHA256"
+          echo "SHA256=$SHA256" >> $GITHUB_ENV
+
+      - name: Checkout xmake-repo
+        uses: actions/checkout@v4
+        with:
+          repository: '你的GitHub用户名/xmake-repo' # 替换为你的 xmake-repo 仓库地址
+          token: ${{ secrets.XMAKE_REPO_PAT }}     # 使用 Personal Access Token 进行跨仓库写权限认证
+          path: 'xmake-repo-local'
+
+      - name: Update xmake.lua in xmake-repo
+        run: |
+          TAG_NAME="${{ env.TAG_NAME }}"
+          SHA256="${{ env.SHA256 }}"
+          
+          # 假设你的包存放在 xmake-repo-local/packages/p/pans/xmake.lua
+          # 请根据你实际的包路径进行调整
+          LUA_PATH="xmake-repo-local/packages/p/pans/xmake.lua"
+          
+          if [ ! -f "$LUA_PATH" ]; then
+            echo "Error: $LUA_PATH not found!"
+            exit 1
+          fi
+          
+          echo "Updating $LUA_PATH with version $TAG_NAME and hash $SHA256"
+          
+          # 在 xmake.lua 中追加或替换对应版本的 add_versions
+          # 这里示范直接在包描述中插入一行新的 add_versions
+          # 你也可以用 Python 脚本来进行更精准的正则替换
+          echo "Adding version to xmake.lua..."
+          
+          # 示例：在包定义的合适位置插入 add_versions("${TAG_NAME}", "${SHA256}")
+          # 这里使用 python 来安全地修改 lua 文件
+          python3 -c "
+          path = '$LUA_PATH'
+          with open(path, 'r') as f:
+              content = f.read()
+          
+          new_version_line = f'    add_versions(\"$TAG_NAME\", \"$SHA256\")\n'
+          
+          # 简单的插入策略：找包内的第一个 add_versions 或者 package_end 前面插入
+          if '$TAG_NAME' not in content:
+              # 假设插入到 package_end() 前面
+              content = content.replace('package_end()', new_version_line + 'package_end()')
+              with open(path, 'w') as f:
+                  f.write(content)
+              print('Successfully updated xmake.lua')
+          else:
+              print('Version already exists in xmake.lua')
+          "
+
+      - name: Commit and Push to xmake-repo
+        run: |
+          cd xmake-repo-local
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add .
+          git commit -m "pans: update version to ${{ env.TAG_NAME }}" || exit 0
+          git push
