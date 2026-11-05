@@ -3,83 +3,147 @@ name: Update xmake-repo Version
 on:
   push:
     tags:
-      - 'v*' # 匹配所有 v 开头的 Tag
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   update-repo:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout current repository
+      # 1. Checkout 当前源码仓库
+      - name: Checkout source repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Calculate Tag SHA256
-        id: calc_sha
+      # 2. 创建 GitHub Release
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
-          
-          # 打包并计算 SHA256
-          ARCHIVE_NAME="archive.tar.gz"
-          git archive --format=tar.gz HEAD > "$ARCHIVE_NAME"
-          SHA256=$(sha256sum "$ARCHIVE_NAME" | awk '{print $1}')
-          
-          echo "SHA256=$SHA256"
-          echo "SHA256=$SHA256" >> $GITHUB_ENV
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
 
+          if ! gh release view "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+
+            gh release create "$TAG_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --generate-notes
+
+            echo "Release $TAG_NAME created."
+          else
+            echo "Release $TAG_NAME already exists."
+          fi
+
+      # 3. 下载 Release 源码归档并计算 SHA256
+      - name: Calculate Release SHA256
+        id: calc_sha
+        shell: bash
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+
+          # xmake 版本去掉 v 前缀
+          VERSION="${TAG_NAME#v}"
+
+          # GitHub 自动生成的 Release 源码归档
+          ARCHIVE_URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG_NAME}.tar.gz"
+
+          curl -fL --retry 3 "$ARCHIVE_URL" -o source.tar.gz
+
+          SHA256=$(sha256sum source.tar.gz | awk '{print $1}')
+
+          echo "TAG_NAME=$TAG_NAME" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "SHA256=$SHA256" >> "$GITHUB_ENV"
+
+          echo "Tag: $TAG_NAME"
+          echo "Version: $VERSION"
+          echo "SHA256: $SHA256"
+
+      # 4. Checkout 私有 xmake 仓库
       - name: Checkout xmake-repo
         uses: actions/checkout@v4
         with:
-          repository: '你的GitHub用户名/xmake-repo' # 替换为你的 xmake-repo 仓库地址
-          token: ${{ secrets.XMAKE_REPO_PAT }}     # 使用 Personal Access Token 进行跨仓库写权限认证
-          path: 'xmake-repo-local'
+          repository: CottonTnT/my-xmake-repo
+          token: ${{ secrets.XMAKE_REPO_TOKEN }}
+          path: xmake-repo-local
+          fetch-depth: 0
+          ref: main
 
-      - name: Update xmake.lua in xmake-repo
+      # 5. 更新 xmake.lua
+      - name: Update xmake.lua
+        shell: bash
         run: |
-          TAG_NAME="${{ env.TAG_NAME }}"
-          SHA256="${{ env.SHA256 }}"
-          
-          # 假设你的包存放在 xmake-repo-local/packages/p/pans/xmake.lua
-          # 请根据你实际的包路径进行调整
-          LUA_PATH="xmake-repo-local/packages/p/pans/xmake.lua"
-          
+          LUA_PATH="xmake-repo-local/packages/c/common/xmake.lua"
+
           if [ ! -f "$LUA_PATH" ]; then
             echo "Error: $LUA_PATH not found!"
             exit 1
           fi
-          
-          echo "Updating $LUA_PATH with version $TAG_NAME and hash $SHA256"
-          
-          # 在 xmake.lua 中追加或替换对应版本的 add_versions
-          # 这里示范直接在包描述中插入一行新的 add_versions
-          # 你也可以用 Python 脚本来进行更精准的正则替换
-          echo "Adding version to xmake.lua..."
-          
-          # 示例：在包定义的合适位置插入 add_versions("${TAG_NAME}", "${SHA256}")
-          # 这里使用 python 来安全地修改 lua 文件
-          python3 -c "
-          path = '$LUA_PATH'
-          with open(path, 'r') as f:
-              content = f.read()
-          
-          new_version_line = f'    add_versions(\"$TAG_NAME\", \"$SHA256\")\n'
-          
-          # 简单的插入策略：找包内的第一个 add_versions 或者 package_end 前面插入
-          if '$TAG_NAME' not in content:
-              # 假设插入到 package_end() 前面
-              content = content.replace('package_end()', new_version_line + 'package_end()')
-              with open(path, 'w') as f:
-                  f.write(content)
-              print('Successfully updated xmake.lua')
-          else:
-              print('Version already exists in xmake.lua')
-          "
 
-      - name: Commit and Push to xmake-repo
+          python3 - "$LUA_PATH" "$VERSION" "$SHA256" <<'PY'
+          import sys
+          import re
+
+          path, version, sha256 = sys.argv[1:]
+
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          # 查找已有版本
+          pattern = re.compile(
+              r'(?m)^([ \t]*)add_versions\(\s*["\']'
+              + re.escape(version)
+              + r'["\']\s*,\s*["\'][^"\']*["\']\s*\)'
+          )
+
+          new_line = f'    add_versions("{version}", "{sha256}")'
+
+          if pattern.search(content):
+              # 已有版本则更新 SHA256
+              content = pattern.sub(new_line, content, count=1)
+              print(f"Updated version {version}")
+          else:
+              # 新版本插入 package_end() 前
+              content, count = re.subn(
+                  r'(?m)^([ \t]*)package_end\(\)',
+                  lambda m: new_line + '\n' + m.group(0),
+                  content,
+                  count=1
+              )
+
+              if count == 0:
+                  print("Error: package_end() not found!")
+                  sys.exit(1)
+
+              print(f"Added version {version}")
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(content)
+          PY
+
+      # 6. Commit and Push
+      - name: Commit and Push
+        shell: bash
         run: |
           cd xmake-repo-local
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          git add .
-          git commit -m "pans: update version to ${{ env.TAG_NAME }}" || exit 0
-          git push
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add packages/c/common/xmake.lua
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Common: update version to ${VERSION}"
+
+          git push origin HEAD:main
